@@ -38,6 +38,8 @@ tmp/
 *.egg-info/
 .installed.cfg
 *.egg
+*.whl
+*.whl.*
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -123,10 +125,15 @@ ENV/
 
 # data
 *.parquet
+models/
 
 
 # local logs
 logs
 log
 outputs
-.history
+
+# local agent/editor settings
+.claude/settings.json
+
+verl-tutorial/
