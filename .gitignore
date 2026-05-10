@@ -132,6 +132,7 @@ models/
 logs
 log
 outputs
+tensorboard_log/
 
 # local agent/editor settings
 .claude/settings.json
