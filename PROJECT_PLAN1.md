@@ -399,7 +399,93 @@ trainer.train()
 2. 完成 v1 (outcome reward only) vs v2 (outcome + process reward) 对比实验
 3. 在 HotpotQA dev distractor 上将 Joint F1 提升 8-15 个点
 
-### 5.3 子任务
+### 5.3 启动前必须讨论确认的关键问题（Phase 3 Kickoff Checklist）
+
+> 这一节是 Phase 3 真正的"重点"。在写第一行 reward 代码前，下面 7 组问题应当**先讨论、定稿、记录到 `notes/phase3_design_decisions.md`**。每组问题都列出常见选项与权衡，方便对话时勾选。
+>
+> **注意 setting 边界**：Phase 3 训练与评测**全部使用 HotpotQA distractor**（train split 训练、dev split 评测），不引入检索/工具调用——那些是 Phase 4 的任务。本阶段的目标是"在已有 10 篇 passages 中做多跳推理"，不是"找到证据"。
+
+#### 讨论组 1：Reward 函数细节（最核心）
+
+这是 Phase 3 最容易踩坑、也最值得花时间打磨的部分。需要明确：
+
+1. **Format reward 的严格度**
+   - 选项 A（硬 0）：缺 `<answer>` 标签直接 reward = 0
+   - 选项 B（软惩罚）：format 正确给 +0.1 bonus，错误不归零只扣分
+   - 选项 C（先 warmup）：训练前 100 步只用 format reward 让模型稳住格式，再接入 F1
+   - 风险：选 A 时，如果 SFT 模型格式正确率不够（< 95%），整个 batch 大量样本 reward = 0，advantage 退化为 0，训练根本动不起来
+
+2. **Answer F1 的具体口径**
+   - 用 HotpotQA 官方 `hotpot_evaluate_v1.py` 的 normalize（去 stopwords、lower、去标点）还是自己写？→ **必须用官方口径**，否则评测数字不可比
+   - 是否拆 EM 与 F1 做 reward？目前默认只用 F1（EM 太稀疏）
+
+3. **Process reward（v2）：从 `<think>` 中提取 supporting facts 的方式**
+   - Supporting facts gold 格式是 `[(title, sent_id), ...]`，但模型在 `<think>` 里只可能写 title（很难精确到句子号）
+   - 选项 A：只匹配 title，sf_f1 退化为 title-level F1
+   - 选项 B：要求模型显式写 `<evidence>Title_A sent 0; Title_B sent 2</evidence>` 这种结构 → 但 SFT 数据没这样训过，需要先回 Phase 2 改 prompt 模板
+   - **建议先选 A**，简单可行；选 B 是更好的论文做法但会跨 phase
+
+4. **v1 vs v2 的权重设置**
+   - 当前文档写的是 `0.5 * answer_f1 + 0.5 * sf_f1`
+   - 是否做 reward 权重的 ablation（α ∈ {0.3, 0.5, 0.7}）？这其实就是 [Phase 5 消融 2](#消融-2process-reward-权重-ablation)，可以提前到 Phase 3 一起做，省一次完整训练
+
+5. **Length penalty 的形式**
+   - 硬阈值（>1024 token 扣 0.1）vs 软衰减（与 length 平滑相关）
+   - 是否在生成早期就开启？建议前 100 步关闭，避免和 format reward 互相干扰
+
+#### 讨论组 2：数据格式与 prompt 一致性
+
+1. **Prompt 模板必须与 Phase 2 SFT 完全对齐**——SFT 学的是格式 A，RL 用格式 B 会让 SFT 冷启动的优势消失。需要在动手前**逐字符对照** [Task 2.2](#task-22cot-数据合成) 的模板与 [Task 3.1](#task-31数据格式转换) 的模板
+2. **Passage 顺序**：每个 epoch 是否对 distractor 顺序做 shuffle？(防止模型记住"gold 总是出现在第 1、3 位"这种伪信号)
+3. **是否过滤 SFT 已经能解决的样本**：可以先用 SFT 模型在 train set 上跑一遍，把 F1 ≥ 0.9 的样本剔除（约 20-30%），把 GRPO 的训练算力集中在"还有提升空间"的样本上。代价是工程多一步，但能省 ~25% 训练时间
+
+#### 讨论组 3：GRPO 关键超参
+
+文档 [5.3 Task 3.3](#task-33grpo-训练配置) 已经给了一组参考值，但有几个需要专门讨论：
+
+1. **`rollout.n`（group size）**：8 是 GRPO 经典设置，但 4090 上 1.5B + n=8 + max_response=1024 显存吃紧。如果 OOM，先降到 6 而不是降 batch
+2. **KL 系数 `kl_loss_coef`**：0.01 偏松 / 0.05 偏紧。SFT 起点质量好的话先用 0.01，发现 KL 暴涨再提
+3. **Loss 形态**：`actor.use_kl_loss=True`（KL 进 loss）vs KL 进 reward shaping。verl 默认前者，保持默认即可
+4. **Advantage normalization**：`algorithm.norm_adv_by_std_in_grpo` 默认 True，必须开（GRPO 论文要求）
+
+#### 讨论组 4：评测频率与 early stopping
+
+1. **训练中评测**：每 50 步在 dev 100 条小样本上评，还是每 100 步？小评测会拖慢训练但能更早发现 reward hacking
+2. **完整 dev set 评测**（7,405 条）：只在训练结束后跑一次，还是中途也跑？建议只跑一次，但保留每 200 步的 checkpoint 以备回溯
+3. **Early stopping 触发条件**：连续 N 个评测点 dev F1 不涨就停？还是固定跑满 500 步？
+
+#### 讨论组 5：v1 vs v2 公平对比
+
+1. **Seed 控制**：v1 与 v2 必须同 seed、同 batch 顺序、同初始化。建议都跑 2 个 seed 取均值（成本翻倍但结论才稳）
+2. **训练步数对齐**：用相同的步数比较，还是用相同的"训练到收敛"步数比较？前者公平，后者更代表"模型真实能力"
+3. **是否需要第三个对照组**：纯 SFT（不做 RL）作为 baseline 必须有，已在 [Task 3.6](#task-36完整-dev-set-评测) 列出
+
+#### 讨论组 6：工程与可重现性
+
+1. **Reward 函数挂载方式**：写在 `verl/utils/reward_score/hotpotqa.py` 里（侵入式）vs 通过 verl 的 `custom_reward_function` 配置（plugin 式）→ **强烈建议 plugin 式**，方便后续升级 verl
+2. **Reward 组件分别 log**：在 `compute_score` 里把 `answer_f1`、`sf_f1`、`format_ok`、`length` 都 return 出去并单独写到 wandb，否则 reward 一旦不对你不知道是哪个组件挂了
+3. **Checkpoint 策略**：`save_freq` 设多少？磁盘只有 500GB，1.5B 模型每 ckpt 约 3GB，建议每 100 步存且只保留最近 3 个 + best
+
+#### 讨论组 7：失败模式预案
+
+在跑训练前先想好"看到 X 现象就采取 Y 行动"，避免在凌晨被报警吵醒后乱调超参：
+
+| 现象 | 触发阈值 | 预案 |
+|------|---------|------|
+| reward < 0.05 持续 50 步 | — | 停训，回看 SFT 模型 format 正确率，可能要先 warmup format |
+| KL > 1.0 | 单点 | lr × 0.5、kl_coef × 5 后续训 |
+| response_length 单步增长 > 5% 持续 30 步 | — | 立即开启 length penalty 或加大已有 penalty |
+| dev F1 涨但 train reward 不涨 | 50 步以上 | 检查 reward 计算是否正确（advantage 退化） |
+
+#### Phase 3 重点小结
+
+> Phase 3 的"重点"不是单纯实现 reward，而是 **"reward 设计 + 训练动力学诊断"**。reward 代码本身只有 ~50 行，但围绕它的 7 组决策每一个错了都会让你白跑一周。
+>
+> **建议执行顺序**：先和我（或人类项目持有者）走完上面 7 组讨论 → 把决策写进 `notes/phase3_design_decisions.md` → 再开始 Task 3.1 数据格式转换。
+
+---
+
+### 5.4 子任务（Task List）
 
 #### Task 3.1：数据格式转换
 
@@ -513,7 +599,7 @@ def compute_reward_v2(solution_str: str, ground_truth: dict) -> float:
 - 任何观察到的异常和调试过程
 - length hacking 是否发生、如何处理
 
-### 5.4 验收标准
+### 5.5 验收标准
 
 - [ ] v1 训练正常完成，dev Answer F1 ≥ 38
 - [ ] v2 训练正常完成，dev Joint F1 ≥ 28，且明显高于 v1
@@ -521,7 +607,7 @@ def compute_reward_v2(solution_str: str, ground_truth: dict) -> float:
 - [ ] 能回答："你的 reward 怎么设计的，为什么这么设计？" "v1 和 v2 的差别是什么？"
 - [ ] 至少处理过一次训练异常（length hacking 或 KL 爆炸）并解决
 
-### 5.5 常见问题与排错
+### 5.6 常见问题与排错
 
 | 现象 | 可能原因 | 解决方案 |
 |------|---------|---------|

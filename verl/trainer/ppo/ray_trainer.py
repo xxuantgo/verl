@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from verl import DataProto
+from verl import DataProto # verl 内部的数据容器，像一个 RL batch，
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
@@ -89,6 +89,12 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
             - The updated data with token-level rewards adjusted by KL penalty
             - A dictionary of metrics related to the KL penalty
     """
+
+    # RLHF/PPO 里经典的 KL 约束,
+    # 这里 token_level_scores 是任务 reward, 比如 GSM8K 答案对了得 1；
+    # old_log_probs 是当前 actor 在 rollout 后重新计算的 logprob；
+    # ref_log_prob 是 reference policy 的 logprob。
+    # KL 的目的不是让模型完全不变，而是防止策略为了 reward 乱漂，例如格式崩坏、胡乱变长、偏离原模型语言能力。
     response_mask = data.batch["response_mask"]
     token_level_scores = data.batch["token_level_scores"]
     batch_size = data.batch.batch_size[0]
@@ -127,6 +133,8 @@ def compute_response_mask(data: DataProto):
     Returns:
         torch.Tensor: The attention mask for the response tokens.
     """
+    # LLM RL 只应该优化模型生成的 response token，不应该把 prompt token 也拿来算 loss/reward/entropy。
+    # 所以后面 advantage、KL、entropy、loss 都会乘 response_mask。
     responses = data.batch["responses"]
     response_length = responses.size(1)
     attention_mask = data.batch["attention_mask"]
@@ -166,6 +174,11 @@ def compute_advantage(
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
+        # 传统 PPO 需要 critic 给每个 token 一个 value
+        # advantages: `(torch.Tensor)`
+        #     shape: (bs, response_length)
+        # Returns: `(torch.Tensor)`
+        #     shape: (bs, response_length)
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],

@@ -168,6 +168,7 @@ class AdaptiveKLController:
             current_kl (float): Current KL divergence value.
             n_steps (int): Number of steps taken.
         """
+        # adaptive KL 会在 KL 太大时增大惩罚，KL 太小时减小惩罚
         target = self.target
         proportional_error = np.clip(current_kl / target - 1, -0.2, 0.2)
         mult = 1 + proportional_error * n_steps / self.horizon

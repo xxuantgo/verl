@@ -56,6 +56,46 @@ def parse_format(text: str) -> tuple[str, str] | None:
     return m.group(1).strip(), m.group(2).strip()
 
 
+# Standalone tag patterns. Used by classify_format below to tell apart
+# "missing tags" (no <answer> at all → format_bonus = 0) from
+# "malformed tags" (tags exist but order/nesting is wrong → format_bonus = -0.1).
+_THINK_OPEN = re.compile(r"<think>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"</think>", re.IGNORECASE)
+_ANSWER_OPEN = re.compile(r"<answer>", re.IGNORECASE)
+_ANSWER_CLOSE = re.compile(r"</answer>", re.IGNORECASE)
+
+
+def classify_format(text: str) -> str:
+    """Classify the format of a student/policy completion.
+
+    Returns one of:
+      * "ok"       — matches FORMAT_RE (full <think>...</think><answer>...</answer>).
+      * "missing"  — at least one expected tag is entirely absent. Treated as a
+                     soft failure: no format bonus, but no penalty either.
+      * "malformed"— tags exist but nesting / order is wrong (e.g. <answer> before
+                     </think>, unbalanced counts). Treated as an active error
+                     and gets a small negative format_bonus.
+
+    Used by the Phase 3 reward function (src/rewards/hotpot.py) to apply the
+    three-tier format_bonus described in PHASE3_GRPO.md §3.3.
+    """
+    if FORMAT_RE.search(text) is not None:
+        return "ok"
+
+    n_to = len(_THINK_OPEN.findall(text))
+    n_tc = len(_THINK_CLOSE.findall(text))
+    n_ao = len(_ANSWER_OPEN.findall(text))
+    n_ac = len(_ANSWER_CLOSE.findall(text))
+
+    # Any tag entirely missing → "missing" (the model just didn't bother).
+    if n_to == 0 or n_tc == 0 or n_ao == 0 or n_ac == 0:
+        return "missing"
+
+    # All four tags present but FORMAT_RE didn't match → ordering / nesting
+    # is wrong, or counts are unbalanced. That's an active format error.
+    return "malformed"
+
+
 def extract_answer(text: str) -> str | None:
     """Return the contents of the last <answer>...</answer> span, or None.
 
