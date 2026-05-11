@@ -23,8 +23,10 @@
 
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LOG_DIR="$REPO_ROOT/logs/phase3"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERL_ROOT="${VERL_ROOT:-/home/luoxuan/runcodes/verl}"
+export VERL_ROOT
+LOG_DIR="$VERL_ROOT/logs/phase3"
 mkdir -p "$LOG_DIR"
 
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
@@ -52,7 +54,7 @@ N_GPUS="${N_GPUS:-$derived_n}"
 EXTRA_OVERRIDES_STR="${EXTRA_OVERRIDES:-}"
 read -r -a EXTRA_OVERRIDES_ARR <<< "$EXTRA_OVERRIDES_STR"
 
-LAUNCHER="$REPO_ROOT/scripts/rl/launch_grpo.sh"
+LAUNCHER="$SCRIPT_DIR/launch_grpo.sh"
 [[ -x "$LAUNCHER" ]] || chmod +x "$LAUNCHER"
 
 run_one () {
